@@ -1,0 +1,16 @@
+{
+  "name": "caex-qrcode",
+  "version": "1.0.0",
+  "description": "QR Code Generator Static Webpage",
+  "scripts": {
+    "test": "npx playwright test",
+    "serve": "npx http-server -p 8080"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "http-server": "^14.1.1"
+  },
+  "keywords": ["qrcode", "generator"],
+  "author": "",
+  "license": "MIT"
+}
