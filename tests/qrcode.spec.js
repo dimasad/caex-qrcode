@@ -2,11 +2,61 @@ import { test, expect } from '@playwright/test';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+
+// Constants
+const TEMP_DIR = path.join(os.tmpdir(), 'qrcode-test');
 
 // Generate a random URL for testing
 function generateRandomUrl() {
   const randomId = Math.random().toString(36).substring(2, 15);
   return `https://example.com/test/${randomId}`;
+}
+
+// Helper to ensure temp directory exists
+function ensureTempDir() {
+  if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+  }
+}
+
+// Helper to wait for QR code to be generated (visible canvas with content)
+async function waitForQRCode(page) {
+  await page.waitForFunction(() => {
+    const canvas = document.getElementById('qr-canvas');
+    return canvas && canvas.style.display !== 'none' && canvas.width > 0;
+  }, { timeout: 5000 });
+}
+
+// Helper to wait for canvas content to change
+async function waitForCanvasChange(page, previousDataUrl) {
+  await page.waitForFunction(
+    (prevUrl) => {
+      const canvas = document.getElementById('qr-canvas');
+      if (!canvas || canvas.style.display === 'none') return false;
+      const currentUrl = canvas.toDataURL('image/png');
+      return currentUrl !== prevUrl;
+    },
+    previousDataUrl,
+    { timeout: 5000 }
+  );
+}
+
+// Helper to decode QR code from data URL
+function decodeQRCode(dataUrl) {
+  ensureTempDir();
+  const tempFile = path.join(TEMP_DIR, `qr-${Date.now()}-${Math.random().toString(36).substring(2, 8)}.png`);
+  const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+  fs.writeFileSync(tempFile, base64Data, 'base64');
+  
+  try {
+    const result = execSync(`zbarimg -q --raw "${tempFile}"`, { encoding: 'utf-8' });
+    return result.trim();
+  } finally {
+    if (fs.existsSync(tempFile)) {
+      fs.unlinkSync(tempFile);
+    }
+  }
 }
 
 test.describe('QR Code Generator', () => {
@@ -42,8 +92,8 @@ test.describe('QR Code Generator', () => {
     // Enter URL
     await urlInput.fill(testUrl);
     
-    // Wait for QR code to be generated (debounce is 300ms)
-    await page.waitForTimeout(500);
+    // Wait for QR code to be generated
+    await waitForQRCode(page);
     
     // Check that QR canvas is now visible
     const qrCanvas = page.locator('#qr-canvas');
@@ -68,7 +118,7 @@ test.describe('QR Code Generator', () => {
     await urlInput.fill(testUrl);
     
     // Wait for QR code to be generated
-    await page.waitForTimeout(500);
+    await waitForQRCode(page);
     
     // Take screenshot of the canvas
     const qrCanvas = page.locator('#qr-canvas');
@@ -80,30 +130,9 @@ test.describe('QR Code Generator', () => {
       return canvas.toDataURL('image/png');
     });
     
-    // Save the PNG to a temporary file
-    const tempDir = '/tmp/qrcode-test';
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    const tempFile = path.join(tempDir, `qr-${Date.now()}.png`);
-    
-    // Remove the data URL prefix and decode base64
-    const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-    fs.writeFileSync(tempFile, base64Data, 'base64');
-    
-    // Use zbarimg to decode the QR code
-    try {
-      const result = execSync(`zbarimg -q --raw "${tempFile}"`, { encoding: 'utf-8' });
-      const decodedUrl = result.trim();
-      
-      // Verify the decoded URL matches the input
-      expect(decodedUrl).toBe(testUrl);
-    } finally {
-      // Clean up temp file
-      if (fs.existsSync(tempFile)) {
-        fs.unlinkSync(tempFile);
-      }
-    }
+    // Decode and verify
+    const decodedUrl = decodeQRCode(dataUrl);
+    expect(decodedUrl).toBe(testUrl);
   });
 
   test('QR code updates when URL changes', async ({ page }) => {
@@ -115,7 +144,7 @@ test.describe('QR Code Generator', () => {
     // Enter first URL
     const firstUrl = generateRandomUrl();
     await urlInput.fill(firstUrl);
-    await page.waitForTimeout(500);
+    await waitForQRCode(page);
     await expect(qrCanvas).toBeVisible();
     
     // Get first QR code data
@@ -126,7 +155,8 @@ test.describe('QR Code Generator', () => {
     // Enter second URL
     const secondUrl = generateRandomUrl();
     await urlInput.fill(secondUrl);
-    await page.waitForTimeout(500);
+    // Wait for canvas content to change
+    await waitForCanvasChange(page, firstDataUrl);
     
     // Get second QR code data
     const secondDataUrl = await page.evaluate(() => {
@@ -137,22 +167,8 @@ test.describe('QR Code Generator', () => {
     expect(firstDataUrl).not.toBe(secondDataUrl);
     
     // Verify second URL is correctly encoded
-    const tempDir = '/tmp/qrcode-test';
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    const tempFile = path.join(tempDir, `qr-${Date.now()}.png`);
-    const base64Data = secondDataUrl.replace(/^data:image\/png;base64,/, '');
-    fs.writeFileSync(tempFile, base64Data, 'base64');
-    
-    try {
-      const result = execSync(`zbarimg -q --raw "${tempFile}"`, { encoding: 'utf-8' });
-      expect(result.trim()).toBe(secondUrl);
-    } finally {
-      if (fs.existsSync(tempFile)) {
-        fs.unlinkSync(tempFile);
-      }
-    }
+    const decodedUrl = decodeQRCode(secondDataUrl);
+    expect(decodedUrl).toBe(secondUrl);
   });
 
   test('QR code hides when URL is cleared', async ({ page }) => {
@@ -165,13 +181,18 @@ test.describe('QR Code Generator', () => {
     
     // Enter URL
     await urlInput.fill('https://example.com');
-    await page.waitForTimeout(500);
+    await waitForQRCode(page);
     await expect(qrCanvas).toBeVisible();
     await expect(downloadBtn).toBeVisible();
     
     // Clear URL
     await urlInput.fill('');
-    await page.waitForTimeout(500);
+    
+    // Wait for QR code to be hidden
+    await page.waitForFunction(() => {
+      const canvas = document.getElementById('qr-canvas');
+      return canvas && canvas.style.display === 'none';
+    }, { timeout: 5000 });
     
     // QR code should be hidden
     await expect(qrCanvas).toBeHidden();
@@ -187,7 +208,7 @@ test.describe('QR Code Generator', () => {
     
     // Enter URL
     await urlInput.fill(testUrl);
-    await page.waitForTimeout(500);
+    await waitForQRCode(page);
     
     // Set up download listener
     const downloadPromise = page.waitForEvent('download');
@@ -203,11 +224,8 @@ test.describe('QR Code Generator', () => {
     expect(download.suggestedFilename()).toBe('qrcode.png');
     
     // Save and verify the downloaded file
-    const tempDir = '/tmp/qrcode-test';
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    const downloadPath = path.join(tempDir, 'downloaded-qr.png');
+    ensureTempDir();
+    const downloadPath = path.join(TEMP_DIR, 'downloaded-qr.png');
     await download.saveAs(downloadPath);
     
     try {
@@ -227,12 +245,22 @@ test.describe('QR Code Generator', () => {
     const urlInput = page.locator('#url-input');
     const qrCanvas = page.locator('#qr-canvas');
     
+    let previousDataUrl = null;
+    
     // Test with multiple random URLs
     for (let i = 0; i < 5; i++) {
       const testUrl = generateRandomUrl();
       
       await urlInput.fill(testUrl);
-      await page.waitForTimeout(500);
+      
+      if (previousDataUrl) {
+        // Wait for canvas content to change from previous QR code
+        await waitForCanvasChange(page, previousDataUrl);
+      } else {
+        // First iteration, just wait for QR code to appear
+        await waitForQRCode(page);
+      }
+      
       await expect(qrCanvas).toBeVisible();
       
       // Get QR code data
@@ -240,23 +268,11 @@ test.describe('QR Code Generator', () => {
         return document.getElementById('qr-canvas').toDataURL('image/png');
       });
       
-      // Save and decode
-      const tempDir = '/tmp/qrcode-test';
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-      const tempFile = path.join(tempDir, `qr-${Date.now()}-${i}.png`);
-      const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-      fs.writeFileSync(tempFile, base64Data, 'base64');
+      // Decode and verify
+      const decodedUrl = decodeQRCode(dataUrl);
+      expect(decodedUrl).toBe(testUrl);
       
-      try {
-        const result = execSync(`zbarimg -q --raw "${tempFile}"`, { encoding: 'utf-8' });
-        expect(result.trim()).toBe(testUrl);
-      } finally {
-        if (fs.existsSync(tempFile)) {
-          fs.unlinkSync(tempFile);
-        }
-      }
+      previousDataUrl = dataUrl;
     }
   });
 });
